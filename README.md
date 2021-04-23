@@ -1,1 +1,1 @@
-# RiotBot
+# CompBot
