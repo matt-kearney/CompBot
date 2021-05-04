@@ -3,6 +3,7 @@ import numpy as np
 
 gamma = .1
 
+
 def sigmoid(x):
     return 1 / (1 + np.e ** (-1 * x))
 
@@ -110,10 +111,11 @@ class Neuron:
     def backpropagate(self, output_delta):
         self.weight = self.weight - gamma * output_delta * self.value
         self.delta = self.weight * output_delta
-        for c in range(0,len(self.clusters)):
+        for c in range(0, len(self.clusters)):
             cluster = self.clusters[c]
             for index in cluster.active_neurons:
                 cluster.inputs[index].weights[self.weights[c]] -= gamma * self.delta * cluster.inputs[index].value
+
 
 class Network:
 
@@ -137,13 +139,14 @@ class Network:
         self.delta = 0
 
     def set_lane_value(self, lane, champ, value):
-        self.lanes[lane_to_int(lane)].add(champ_ids[champ], value)
+        self.lanes[lane_to_int(lane)].add(champ_ids[champ]['index'], value)
 
     def solve(self):
         self.output_value = 0
         for lane in self.lanes:
-            for a in range(0,2):
-                self.output_value += lane.inputs[lane.active_neurons[a]].value * lane.input[lane.active_neurons[a]].weights[0]
+            for a in range(0, 2):
+                self.output_value += lane.inputs[lane.active_neurons[a]].value * \
+                                     lane.input[lane.active_neurons[a]].weights[0]
         for neuron in self.output:
             self.output_value += neuron.value * neuron.weight
         self.output_value = sigmoid(self.output_value)
@@ -154,7 +157,8 @@ class Network:
             neuron.backpropagate(self.delta)
         for lane in self.lanes:
             for a in range(0, 2):
-                lane.inputs[lane.active_neurons[a]].weights[0] -= gamma * self.delta * lane.inputs[lane.active_neurons[a]].value
+                lane.inputs[lane.active_neurons[a]].weights[0] -= gamma * self.delta * lane.inputs[
+                    lane.active_neurons[a]].value
 
     def reset(self):
         self.delta = 0
