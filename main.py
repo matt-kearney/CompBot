@@ -9,6 +9,9 @@ from discord.ext import commands
 # dotenv
 from dotenv import load_dotenv
 
+# riot imports
+from riotwatcher import LolWatcher, ApiError
+
 # local imports
 from riotbot import RiotBot, User, ClashGame
 from util import debug, role_text, valid_lane
@@ -24,6 +27,10 @@ if len(sys.argv) > 1:
 
 client = commands.Bot(command_prefix="=")
 token = os.getenv("DISCORD_BOT_TOKEN")
+
+api_key = os.getenv("API_KEY")
+watcher = LolWatcher(api_key)
+my_region = 'na1'
 
 
 @client.event
