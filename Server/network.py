@@ -56,6 +56,8 @@ class Cluster:
         self.active_neurons = []
 
     def reset(self):
+        for n in self.active_neurons:
+            self.inputs[n].value = 0
         self.active_neurons = []
 
     def add(self, index, value):
@@ -98,6 +100,12 @@ class Neuron:
                 self.weights = [3, 5, 3]
             else:
                 self.weights = [3, 4, 3]
+
+    def reset(self):
+        self.value = 0
+        self.delta = 0
+        for cluster in self.clusters:
+            cluster.reset()
 
     def backpropagate(self, output_delta):
         self.weight = self.weight - gamma * output_delta * self.value
@@ -147,3 +155,9 @@ class Network:
         for lane in self.lanes:
             for a in range(0, 2):
                 lane.inputs[lane.active_neurons[a]].weights[0] -= gamma * self.delta * lane.inputs[lane.active_neurons[a]].value
+
+    def reset(self):
+        self.delta = 0
+        self.output_value = 0
+        for neuron in self.output:
+            neuron.reset()
