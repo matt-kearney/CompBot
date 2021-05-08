@@ -1,8 +1,9 @@
 import numpy as np
-import interface
+
+from interface import champ_ids
 
 gamma = .1
-champ_ids = interface.champ_ids
+
 
 def sigmoid(x):
     return 1 / (1 + np.e ** (-1 * x))

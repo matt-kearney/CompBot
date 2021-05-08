@@ -2,10 +2,9 @@
 
 from riotwatcher import LolWatcher, ApiError
 from dotenv import load_dotenv
-import os
-import logging
-import threading
-import time
+import os, logging, threading, time, queue
+
+# import roleml (UNUSED)
 
 import network
 
@@ -36,26 +35,42 @@ class Game:
         self.blue_team = []
         self.red_team = []
         self.blue_winner = 0
+        self.lanes = {'MID': 0, 'BOT': 0, 'JUN': 0, "SUP": 0, "TOP": 0}
 
     def add_blue(self, champ, lane):
-        self.blue_team.append({'champ': champ, 'lane': lane})
+        if lane == "NULL":
+            return
+        self.blue_team.append({'champ': champ_ids[champ]['index'], 'lane': lane})
+        self.lanes[lane] += 1
 
     def add_red(self, champ, lane):
-        self.red_team.append({'champ': champ, 'lane': lane})
+        if lane == "NULL":
+            return
+        self.red_team.append({'champ': champ_ids[champ]['index'], 'lane': lane})
+        self.lanes[lane] += 1
 
     # 1 for true, -1 for false
     def set_blue_winner(self, win):
         self.blue_winner = win
 
     def push_to_network(self, network):
+        print(self.lanes)
         if len(self.blue_team) != 5 or len(self.red_team) != 5:
             print("ERROR")
             return
+        for lane in self.lanes.keys():
+            if self.lanes[lane] != 2:
+                print("Lanes not correct")
+                return
+        print("Pushing to network!")
         for a in range(0, 5):
             network.set_lane_value(self.blue_team[a]['lane'], self.blue_team[a]['champ'], 1)
             network.set_lane_value(self.red_team[a]['lane'], self.red_team[a]['champ'], -1)
         network.solve()
         network.backpropagate(self.blue_winner)
+
+    def __str__(self):
+        return str(self.blue_team).join(str(self.red_team))
 
 
 # Returns all ranked players in platinum and diamond elo
@@ -67,7 +82,7 @@ def find_all_ranked_players():
     return players
 
 
-games_to_process = []
+games_to_process = queue.Queue()
 matches = []
 
 
@@ -75,14 +90,14 @@ matches = []
 # If the match_id is already in the list, it returns true. Otherwise, it adds it and returns false.
 def find_and_insert_match(match_id):
     start, end = 0, len(matches)
-    midpoint = len(matches) / 2
+    midpoint = int(len(matches) / 2)
     while start != end:
         if matches[midpoint] < match_id:
             start = midpoint
-            midpoint = (start + end) / 2
+            midpoint = int((start + end) / 2)
         elif matches[midpoint] > match_id:
             end = midpoint
-            midpoint = (start + end) / 2
+            midpoint = int((start + end) / 2)
         elif matches[midpoint] == match_id:
             return True
     matches.insert(start, match_id)
@@ -97,20 +112,31 @@ def game_miner():
     begin_time = current_time_milli()
     for player in all_players:
         try:
-            accountID = watcher.summoner.by_name(my_region, 'mediocrebeandip' )['accountId'] #player['summonerName']
-            match_list = watcher.match.matchlist_by_account(region=my_region, encrypted_account_id=accountID, queue=[420,440])
+            # Iterate through all players and push all their matches onto the queue if the match was not present in the cache
+            accountID = watcher.summoner.by_name(my_region, player['summonerName'])['accountId']
+            match_list = watcher.match.matchlist_by_account(region=my_region, encrypted_account_id=accountID,
+                                                            queue=[420, 440])
             for match in match_list['matches']:
-                print(match)
-                print(champ_ids[match['champion']]['name'])
+                if not find_and_insert_match(int(match['gameId'])):
+                    try:
+                        match_data = watcher.match.by_id(my_region, match['gameId'])
+                        games_to_process.put(match_data)
+                    except ApiError as err:
+                        code = int(str(err)[0:3])
+                        if code == 429:
+                            logging.info("429 Error. Exceeded Rate Limit. Sleeping.")
+                            time.sleep(24 - (current_time_milli() - begin_time) * 1000)
+                            begin_time = current_time_milli()
         except ApiError as err:
             # Handle HTTP error codes
             code = int(str(err)[0:3])
             if code == 400:
                 logging.info("400 Error. Bad Request.")
             elif code == 429:
-                # sleep for 2 minutes since we reached max # of requests
+                # sleep for 1 minute since we reached max # of requests
+                # (we hit 20/s once, then 100/ 2 min, so we wait 24 seconds for average)
                 logging.info("429 Error. Exceeded Rate Limit. Sleeping.")
-                time.sleep(120000 - (current_time_milli() - begin_time))
+                time.sleep(24 - (current_time_milli() - begin_time)*1000)
                 begin_time = current_time_milli()
             elif code == 403:
                 logging.info("403 Error. Renew API Key")
@@ -121,10 +147,48 @@ def game_miner():
 
 
 def start():
-    process_thread = threading.Thread(target=game_miner)
+    process_thread = threading.Thread(target=game_miner, daemon=True)
+    process_thread.setDaemon(True)
     process_thread.start()
+
+
+def player_to_role(player):
+    role = player['timeline']['role']
+    lane = player['timeline']['lane']
+    if lane == 'BOTTOM':
+        if role == 'DUO_CARRY':
+            return "BOT"
+        else:
+            return "SUP"
+    elif lane == 'JUNGLE':
+        return 'JUN'
+    elif lane == 'TOP':
+        return "TOP"
+    elif lane == 'MIDDLE':
+        return "MID"
+    else:
+        return "NULL"
 
 if __name__ == "__main__":
     all_players = find_all_ranked_players()
     logging.info("Interface    : players recieved.")
     start()
+    network = network.Network()
+    while True:
+        parse_me = games_to_process.get()
+        # roleml.predict(parse_me) (UNUSED)
+        if parse_me is None:
+            logging.info("Cannot parse none. Sleeping for 10s.")
+            time.sleep(10)
+            continue
+        game = Game()
+        if parse_me['participants'][0]['stats']['win']:
+            game.set_blue_winner(True)
+        else:
+            game.set_blue_winner(False)
+        for player in parse_me['participants']:
+            if player['teamId'] == 100:
+                game.add_blue(player['championId'], player_to_role(player))
+            else:
+                game.add_red(player['championId'], player_to_role(player))
+        game.push_to_network(network)
