@@ -3,10 +3,15 @@
 from riotwatcher import LolWatcher, ApiError
 from dotenv import load_dotenv
 import os
+import logging
+import threading
+import time
 
 import network
 
+# setup
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
 # API info
 api_key = os.getenv("API_KEY")
@@ -51,3 +56,75 @@ class Game:
             network.set_lane_value(self.red_team[a]['lane'], self.red_team[a]['champ'], -1)
         network.solve()
         network.backpropagate(self.blue_winner)
+
+
+# Returns all ranked players in platinum and diamond elo
+def find_all_ranked_players():
+    players = []
+    for tier in ['PLATINUM', 'DIAMOND']:
+        for division in ['I', 'II', 'III', 'IV']:
+            players += watcher.league.entries(my_region, "RANKED_SOLO_5x5", tier, division)
+    return players
+
+
+games_to_process = []
+matches = []
+
+
+# Attempts to insert a match_id into the list
+# If the match_id is already in the list, it returns true. Otherwise, it adds it and returns false.
+def find_and_insert_match(match_id):
+    start, end = 0, len(matches)
+    midpoint = len(matches) / 2
+    while start != end:
+        if matches[midpoint] < match_id:
+            start = midpoint
+            midpoint = (start + end) / 2
+        elif matches[midpoint] > match_id:
+            end = midpoint
+            midpoint = (start + end) / 2
+        elif matches[midpoint] == match_id:
+            return True
+    matches.insert(start, match_id)
+    return False
+
+
+def current_time_milli():
+    return round(time.time() * 1000)
+
+
+def game_miner():
+    begin_time = current_time_milli()
+    for player in all_players:
+        try:
+            accountID = watcher.summoner.by_name(my_region, 'mediocrebeandip' )['accountId'] #player['summonerName']
+            match_list = watcher.match.matchlist_by_account(region=my_region, encrypted_account_id=accountID, queue=[420,440])
+            for match in match_list['matches']:
+                print(match)
+                print(champ_ids[match['champion']]['name'])
+        except ApiError as err:
+            # Handle HTTP error codes
+            code = int(str(err)[0:3])
+            if code == 400:
+                logging.info("400 Error. Bad Request.")
+            elif code == 429:
+                # sleep for 2 minutes since we reached max # of requests
+                logging.info("429 Error. Exceeded Rate Limit. Sleeping.")
+                time.sleep(120000 - (current_time_milli() - begin_time))
+                begin_time = current_time_milli()
+            elif code == 403:
+                logging.info("403 Error. Renew API Key")
+            else:
+                logging.info(code)
+
+        exit()
+
+
+def start():
+    process_thread = threading.Thread(target=game_miner)
+    process_thread.start()
+
+if __name__ == "__main__":
+    all_players = find_all_ranked_players()
+    logging.info("Interface    : players recieved.")
+    start()
