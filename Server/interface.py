@@ -21,13 +21,18 @@ my_region = 'na1'
 latest = watcher.data_dragon.versions_for_region(my_region)['n']['champion']
 static_champ_list = watcher.data_dragon.champions(latest, False, 'en_US')
 
+# process champion IDs
 champ_ids = {}
 n = 0
+file = open('champs.txt', 'w')
 for key in static_champ_list['data']:
     champ_ids[int(static_champ_list['data'][key]['key'])] = {'index': n, 'name': key}
+    # write to text file for debugging purposes
+    file.write('{0}: [{1}, {2}]\n'.format(int(static_champ_list['data'][key]['key']), n, key))
     n += 1
 
 
+# Game object is the form our data needs to be in so our network is able to process the data
 class Game:
 
     # champs represented as indices of which they would occur on the network
@@ -37,12 +42,14 @@ class Game:
         self.blue_winner = 0
         self.lanes = {'MID': 0, 'BOT': 0, 'JUN': 0, "SUP": 0, "TOP": 0}
 
+    # add a champion to a specific lane on blue team
     def add_blue(self, champ, lane):
         if lane == "NULL":
             return
         self.blue_team.append({'champ': champ_ids[champ]['index'], 'lane': lane})
         self.lanes[lane] += 1
 
+    # add a champion to a specific lane on blue team
     def add_red(self, champ, lane):
         if lane == "NULL":
             return
@@ -53,8 +60,10 @@ class Game:
     def set_blue_winner(self, win):
         self.blue_winner = win
 
+    # push the current data structure to the network
     def push_to_network(self, network):
         print(self.lanes)
+        # we check for cases such as teams not both having 5 members or repeated lanes
         if len(self.blue_team) != 5 or len(self.red_team) != 5:
             print("ERROR")
             return
@@ -63,20 +72,22 @@ class Game:
                 print("Lanes not correct")
                 return
         print("Pushing to network!")
+        print(self)
+        # iterate and set network values
         for a in range(0, 5):
             network.set_lane_value(self.blue_team[a]['lane'], self.blue_team[a]['champ'], 1)
-            network.set_lane_value(self.red_team[a]['lane'], self.red_team[a]['champ'], -1)
+            network.set_lane_value(self.red_team[a]['lane'], self.red_team[a]['champ'], 0)
         network.solve()
-        network.backpropagate(self.blue_winner)
+        network.backpropagate(int(self.blue_winner))
 
     def __str__(self):
-        return str(self.blue_team).join(str(self.red_team))
+        return 'BLUE: {0} , RED: {1}, winner: {2}'.format(self.blue_team, self.red_team, self.blue_winner)
 
 
 # Returns all ranked players in platinum and diamond elo
 def find_all_ranked_players():
     players = []
-    for tier in ['PLATINUM', 'DIAMOND']:
+    for tier in ['DIAMOND', 'PLATINUM']:
         for division in ['I', 'II', 'III', 'IV']:
             players += watcher.league.entries(my_region, "RANKED_SOLO_5x5", tier, division)
     return players
@@ -104,15 +115,18 @@ def find_and_insert_match(match_id):
     return False
 
 
+# return the current time in milliseconds
 def current_time_milli():
     return round(time.time() * 1000)
 
 
+# function for mining Riot's data
 def game_miner():
     begin_time = current_time_milli()
     for player in all_players:
         try:
-            # Iterate through all players and push all their matches onto the queue if the match was not present in the cache
+            # Iterate through all players and push all their matches onto the queue if the match was not present in
+            # the cache
             accountID = watcher.summoner.by_name(my_region, player['summonerName'])['accountId']
             match_list = watcher.match.matchlist_by_account(region=my_region, encrypted_account_id=accountID,
                                                             queue=[420, 440])
@@ -136,7 +150,7 @@ def game_miner():
                 # sleep for 1 minute since we reached max # of requests
                 # (we hit 20/s once, then 100/ 2 min, so we wait 24 seconds for average)
                 logging.info("429 Error. Exceeded Rate Limit. Sleeping.")
-                time.sleep(24 - (current_time_milli() - begin_time)*1000)
+                time.sleep(24 - (current_time_milli() - begin_time) * 1000)
                 begin_time = current_time_milli()
             elif code == 403:
                 logging.info("403 Error. Renew API Key")
@@ -146,12 +160,14 @@ def game_miner():
         exit()
 
 
+# start thread
 def start():
     process_thread = threading.Thread(target=game_miner, daemon=True)
     process_thread.setDaemon(True)
     process_thread.start()
 
 
+# converts a player to their role
 def player_to_role(player):
     role = player['timeline']['role']
     lane = player['timeline']['lane']
@@ -169,18 +185,20 @@ def player_to_role(player):
     else:
         return "NULL"
 
+
+# main
 if __name__ == "__main__":
     all_players = find_all_ranked_players()
     logging.info("Interface    : players recieved.")
     start()
     network = network.Network()
     while True:
-        parse_me = games_to_process.get()
-        # roleml.predict(parse_me) (UNUSED)
-        if parse_me is None:
+        if games_to_process.qsize() == 0:
             logging.info("Cannot parse none. Sleeping for 10s.")
             time.sleep(10)
             continue
+        parse_me = games_to_process.get()
+        # roleml.predict(parse_me) (UNUSED)
         game = Game()
         if parse_me['participants'][0]['stats']['win']:
             game.set_blue_winner(True)

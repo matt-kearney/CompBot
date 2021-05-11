@@ -4,7 +4,6 @@ from interface import champ_ids
 
 gamma = .1
 
-
 def sigmoid(x):
     return 1 / (1 + np.e ** (-1 * x))
 
@@ -36,7 +35,7 @@ class Input:
         self.value = 0
         self.weights = []
         for a in range(0, size):
-            self.weights.append(0)
+            self.weights.append(.5)
 
     def set_input(self, value):
         self.value = value
@@ -50,11 +49,11 @@ class Cluster:
         self.inputs = []
         self.value = 0
         if role == "JUN":
-            size = 6
+            self.size = 6
         else:
-            size = 4
+            self.size = 4
         for champ in champ_ids:
-            self.inputs.append(Input(champ, size))
+            self.inputs.append(Input(champ, self.size))
         self.active_neurons = []
 
     def reset(self):
@@ -66,6 +65,9 @@ class Cluster:
         self.active_neurons.append(index)
         self.inputs[index].value = value
 
+    def __str__(self):
+        return 'CLUSTER {0}: Size of Inputs: {1}'.format(self.role, self.size)
+
 
 class Neuron:
 
@@ -74,7 +76,8 @@ class Neuron:
         self.value = 0
         self.weights = []
         self.delta = 0
-        self.weight = 0
+        self.weight = .5
+        self.init_weights(clusters)
 
     def solve(self):
         self.value = 0
@@ -85,23 +88,26 @@ class Neuron:
             weight += 1
         self.value = sigmoid(self.value)
 
-    # initialize weight indices
+    # initialize weights vector
+    # The weights vector defines the indices of the corresponding inputs that lead to this cluster.
+    # If the length is 1, then the 0th weight of the input node leads to this cluster
+    # If lenght = 2, then the
     def init_weights(self, clusters):
         if len(clusters) == 1:
             self.weights = [1]
         elif len(clusters) == 2:
             if clusters[0].role == "JUN":
                 if clusters[1].role == "MID":
-                    self.weights = [2, 2]
+                    self.weights = [2, 2] # JUN/MID
                 else:
-                    self.weights = [3, 2]
+                    self.weights = [3, 2] # JUN/TOP
             else:
-                self.weights = [2, 2]
+                self.weights = [2, 2] # BOT/SUP
         elif len(clusters) == 3:
             if clusters[0].role == "BOT":
-                self.weights = [3, 5, 3]
+                self.weights = [3, 5, 3] # BOT/JUN/SUP
             else:
-                self.weights = [3, 4, 3]
+                self.weights = [4, 3, 3] # JUN/MID/TOP
 
     def reset(self):
         self.value = 0
@@ -112,10 +118,14 @@ class Neuron:
     def backpropagate(self, output_delta):
         self.weight = self.weight - gamma * output_delta * self.value
         self.delta = self.weight * output_delta
+        #print('WEIGHT: {0}\tDELTA: {1}'.format(self.weight, output_delta))
         for c in range(0, len(self.clusters)):
             cluster = self.clusters[c]
             for index in cluster.active_neurons:
+                #weight[a] = weight[a] - gamma * delta * value
                 cluster.inputs[index].weights[self.weights[c]] -= gamma * self.delta * cluster.inputs[index].value
+                #print('GAMMA: {0}\tDELTA: {1}\tVALUE: {2}'.format(gamma, self.delta, cluster.inputs[index].value))
+                print('LANE: {0}\tINPUT: {1}\tWEIGHT: {2}\tVALUE: {3}'.format(cluster.role, index, self.weights[c], cluster.inputs[index].weights[self.weights[c]]))
 
 
 class Network:
@@ -139,20 +149,23 @@ class Network:
         self.output_value = 0
         self.delta = 0
 
-    def set_lane_value(self, lane, champ, value):
-        self.lanes[lane_to_int(lane)].add(champ_ids[champ]['index'], value)
+    def set_lane_value(self, lane, index, value):
+        self.lanes[lane_to_int(lane)].add(index, value)
 
     def solve(self):
         self.output_value = 0
+        # add champ weights
         for lane in self.lanes:
             for a in range(0, 2):
-                self.output_value += lane.inputs[lane.active_neurons[a]].value * \
-                                     lane.input[lane.active_neurons[a]].weights[0]
+                self.output_value += sigmoid(lane.inputs[lane.active_neurons[a]].value * \
+                                     lane.inputs[lane.active_neurons[a]].weights[0])
+        # add neuron weights
         for neuron in self.output:
-            self.output_value += neuron.value * neuron.weight
+            self.output_value += sigmoid(neuron.value * neuron.weight)
         self.output_value = sigmoid(self.output_value)
 
     def backpropagate(self, expected):
+        global output_log
         self.delta = (self.output_value - expected) * self.output_value * (1 - self.output_value)
         for neuron in self.output:
             neuron.backpropagate(self.delta)
@@ -160,6 +173,12 @@ class Network:
             for a in range(0, 2):
                 lane.inputs[lane.active_neurons[a]].weights[0] -= gamma * self.delta * lane.inputs[
                     lane.active_neurons[a]].value
+        # weight[a] = weight[a] - gamma * delta * value
+        for lane in self.lanes:
+            for a in range(0, 2):
+                lane.inputs[lane.active_neurons[a]].weights[0] -= gamma * self.delta * lane.inputs[lane.active_neurons[a]].value
+                print('LANE: {0}\tINPUT: {1}\tWEIGHT: {2}\tVALUE: {3}'.format(lane.role, lane.active_neurons[a], lane.inputs[lane.active_neurons[a]].weights[0], lane.inputs[lane.active_neurons[a]].value))
+        self.reset()
 
     def reset(self):
         self.delta = 0
