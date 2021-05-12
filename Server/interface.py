@@ -2,11 +2,11 @@
 
 from riotwatcher import LolWatcher, ApiError
 from dotenv import load_dotenv
-import os, logging, threading, time, queue
+import os, logging, threading, time, queue, math
 
 # import roleml (UNUSED)
 
-import Server.network as ne
+import network as ne
 
 
 # return the current time in milliseconds
@@ -14,27 +14,36 @@ def current_time_milli():
     return round(time.time() * 1000)
 
 
-watcher = None
-my_region = None
+# GLOBAL VARIABLES
+
+# setup
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+
+# API info
+api_key = os.getenv("API_KEY")
+watcher = LolWatcher(api_key)
+my_region = 'na1'
+
+# GLOBAL DATA STRUCTURES
+
 champ_ids = {}
 games_to_process = queue.Queue()
 matches = []
 all_players = []
 begin_time = current_time_milli()
+players = []
+
+# GLOBAL FILES
+
+match_id_file = open("match_ids.txt", "a")
+players_file = open("players.txt", "a")
+game_data_file = open("game_data.txt", "a")
 
 
 def init():
-    global watcher
-    global my_region
     global champ_ids
-    # setup
-    load_dotenv()
-    logging.basicConfig(level=logging.INFO)
-
-    # API info
-    api_key = os.getenv("API_KEY")
-    watcher = LolWatcher(api_key)
-    my_region = 'na1'
+    global all_players
 
     # obtain static champ list for pre-processing
     latest = watcher.data_dragon.versions_for_region(my_region)['n']['champion']
@@ -50,16 +59,51 @@ def init():
         file.write('{0}: [{1}, {2}]\n'.format(int(static_champ_list['data'][key]['key']), n, key))
         n += 1
 
+    all_players = find_all_ranked_players()
+
+
+def file_init():
+    global match_id_file
+    global players_file
+    global game_data_file
+
+    match_id_file = open("match_ids.txt", "r")
+    players_file = open("players.txt", "r")
+    game_data_file = open("game_data.txt", "r")
+
+    for match in match_id_file:
+        find_and_insert_match(int(match))
+    for player in players_file:
+        find_and_insert_player(player)
+    for game in game_data_file:
+        g = Game()
+        g.from_file_str(game)
+        games_to_process.put(g)
+
+    match_id_file = open("match_ids.txt", "a")
+    players_file = open("players.txt", "a")
+    game_data_file = open("game_data.txt", "a")
+
 
 # Game object is the form our data needs to be in so our network is able to process the data
 class Game:
 
     # champs represented as indices of which they would occur on the network
-    def __init__(self):
+    def __init__(self, match_data=None):
         self.blue_team = []
         self.red_team = []
         self.blue_winner = 0
         self.lanes = {'MID': 0, 'BOT': 0, 'JUN': 0, "SUP": 0, "TOP": 0}
+        if match_data is not None:
+            if match_data['participants'][0]['stats']['win']:
+                self.set_blue_winner(True)
+            else:
+                self.set_blue_winner(False)
+            for player in match_data['participants']:
+                if player['teamId'] == 100:
+                    self.add_blue(player['championId'], player_to_role(player))
+                else:
+                    self.add_red(player['championId'], player_to_role(player))
 
     # add a champion to a specific lane on blue team
     def add_blue(self, champ, lane):
@@ -102,15 +146,51 @@ class Game:
     def __str__(self):
         return 'BLUE: {0} , RED: {1}, winner: {2}'.format(self.blue_team, self.red_team, self.blue_winner)
 
+    # Game file str is how the Game object is written into a file
+    # The format will be the following separated by tab (\t):
+    # 0 or 1, indicating blue_team_winner boolean
+    # Blue team's champs (as indices) and lanes. Each separated by \t
+    # Red team's champs and lanes
+    def to_file_str(self):
+        if len(self.blue_team) != 5 or len(self.red_team) != 5:
+            return "ERROR"
+        for lane in self.lanes.keys():
+            if self.lanes[lane] != 2:
+                return "ERROR"
+        str = ""
+        if self.blue_winner:
+            str += "1\t"
+        else:
+            str += "0\t"
+        for blue in self.blue_team:
+            str += "{0}\t{1}\t".format(blue['champ'], blue['lane'])
+        for red in self.red_team:
+            str += "{0}\t{1}\t".format(red['champ'], red['lane'])
+        return str
+
+    # generates a Game object from str. It's assumed that any game object written to the file is valid
+    def from_file_str(self, str):
+        split = str.split("\t")
+        if split[0] == "0":
+            self.blue_winner = True
+        else:
+            self.blue_winner = False
+        for a in range(1, 11, 2):
+            self.blue_team.append({'champ': split[a], 'lane': split[a + 1]})
+            self.lanes[split[a + 1]] += 1
+        for a in range(11, 21, 2):
+            self.red_team.append({'champ': split[a], 'lane': split[a + 1]})
+            self.lanes[split[a + 1]] += 1
+
 
 # Returns all ranked players in platinum and diamond elo
 # TODO: Make this function safe.
 def find_all_ranked_players():
-    players = []
+    tmp_player_list = []
     for tier in ['DIAMOND', 'PLATINUM']:
         for division in ['I', 'II', 'III', 'IV']:
-            players += watcher.league.entries(my_region, "RANKED_SOLO_5x5", tier, division)
-    return players
+            tmp_player_list += watcher.league.entries(my_region, "RANKED_SOLO_5x5", tier, division)
+    return tmp_player_list
 
 
 # Attempts to insert a match_id into the list
@@ -118,27 +198,36 @@ def find_all_ranked_players():
 def find_and_insert_match(match_id):
     start, end = 0, len(matches)
     midpoint = int(len(matches) / 2)
-    while start != end:
+    while start != end and start != end-1:
+        print("START: {0}\tMIDPOINT: {1}\tEND: {2}\t".format(start, midpoint, end))
         if matches[midpoint] < match_id:
             start = midpoint
-            midpoint = int((start + end) / 2)
+            midpoint = math.floor((start + end) / 2)
         elif matches[midpoint] > match_id:
             end = midpoint
-            midpoint = int((start + end) / 2)
+            midpoint = math.floor((start + end) / 2)
         elif matches[midpoint] == match_id:
             return True
     matches.insert(start, match_id)
     return False
 
 
+# Attempts to insert a player into the list
+# If the player is already in the list, it returns true. Otherwise, it adds it and returns false.
+# TODO: Optimize this
+def find_and_insert_player(player):
+    for i in players:
+        if player == i:
+            return True
+    players.append(player)
+    return False
+
+
+# Handle API error
 def handle_api_err(err, callback, data):
-    global begin_time
     code = int(str(err)[0:3])
     if code == 429:
-        time_to_sleep = 24 - (current_time_milli() - begin_time) * 1000
-        print("429 Error. Exceeded Rate Limit. Sleeping for {0} seconds.".format(time_to_sleep))
-        time.sleep(time_to_sleep)
-        begin_time = current_time_milli()
+        print("429 Error. Exceeded Rate Limit. ")
         return callback(data)
     elif code == 400:
         print("400 Error. Bad request.")
@@ -175,12 +264,13 @@ def get_match(match):
     return None
 
 
-# function for mining Riot's data
-def game_miner():
+# function for parsing Riot's data and processing it
+def mine_and_process():
     for player in all_players:
         player_id = get_player_ID(player)
         if player_id is None:
             print("ERROR???")
+            continue
         match_list = get_player_match_list(player_id)
         for match in match_list:
             match_data = get_match(match)
@@ -188,9 +278,32 @@ def game_miner():
                 games_to_process.put(match_data)
 
 
+# function for mining Riot's game data
+def mine():
+    for player in all_players:
+        print("PROCESSING PLAYER: {0}".format(player['summonerName']))
+        if not find_and_insert_player(player):
+            player_id = get_player_ID(player)
+            if player_id is None:
+                continue
+            match_list = get_player_match_list(player_id)['matches']
+            for match in match_list:
+                match_data = get_match(match)
+                if match_data is not None:
+                    print("PROCESSING MATCH: {0}".format(match['gameId']))
+                    match_id_file.write(str(match['gameId']) + '\n')
+                    game = Game(match_data)
+                    write_me = game.to_file_str() + '\n'
+                    if write_me == "ERROR\n":
+                        continue
+                    else:
+                        game_data_file.write(write_me)
+        players_file.write(player['summonerName'] + '\n')
+
+
 # start thread
 def start():
-    process_thread = threading.Thread(target=game_miner, daemon=True)
+    process_thread = threading.Thread(target=mine_and_process, daemon=True)
     process_thread.setDaemon(True)
     process_thread.start()
 
@@ -217,7 +330,6 @@ def player_to_role(player):
 # process
 def process():
     global all_players
-    init()
     all_players = find_all_ranked_players()
     logging.info("Interface    : players recieved.")
     start()
@@ -229,19 +341,18 @@ def process():
             continue
         parse_me = games_to_process.get()
         # roleml.predict(parse_me) (UNUSED)
-        game = Game()
-        if parse_me['participants'][0]['stats']['win']:
-            game.set_blue_winner(True)
-        else:
-            game.set_blue_winner(False)
-        for player in parse_me['participants']:
-            if player['teamId'] == 100:
-                game.add_blue(player['championId'], player_to_role(player))
-            else:
-                game.add_red(player['championId'], player_to_role(player))
+        game = Game(parse_me)
         game.push_to_network(network)
+
+
+# initialize environment for passive mining
+def passive_mine_init():
+    file_init()
+    mine()
 
 
 # main
 if __name__ == "__main__":
-    process()
+    init()
+    passive_mine_init()
+    # process()
