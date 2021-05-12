@@ -6,30 +6,49 @@ import os, logging, threading, time, queue
 
 # import roleml (UNUSED)
 
-import network
+import Server.network as ne
 
-# setup
-load_dotenv()
-logging.basicConfig(level=logging.INFO)
 
-# API info
-api_key = os.getenv("API_KEY")
-watcher = LolWatcher(api_key)
-my_region = 'na1'
+# return the current time in milliseconds
+def current_time_milli():
+    return round(time.time() * 1000)
 
-# obtain static champ list for pre-processing
-latest = watcher.data_dragon.versions_for_region(my_region)['n']['champion']
-static_champ_list = watcher.data_dragon.champions(latest, False, 'en_US')
 
-# process champion IDs
+watcher = None
+my_region = None
 champ_ids = {}
-n = 0
-file = open('champs.txt', 'w')
-for key in static_champ_list['data']:
-    champ_ids[int(static_champ_list['data'][key]['key'])] = {'index': n, 'name': key}
-    # write to text file for debugging purposes
-    file.write('{0}: [{1}, {2}]\n'.format(int(static_champ_list['data'][key]['key']), n, key))
-    n += 1
+games_to_process = queue.Queue()
+matches = []
+all_players = []
+begin_time = current_time_milli()
+
+
+def init():
+    global watcher
+    global my_region
+    global champ_ids
+    # setup
+    load_dotenv()
+    logging.basicConfig(level=logging.INFO)
+
+    # API info
+    api_key = os.getenv("API_KEY")
+    watcher = LolWatcher(api_key)
+    my_region = 'na1'
+
+    # obtain static champ list for pre-processing
+    latest = watcher.data_dragon.versions_for_region(my_region)['n']['champion']
+    static_champ_list = watcher.data_dragon.champions(latest, False, 'en_US')
+
+    # process champion IDs
+    champ_ids = {}
+    n = 0
+    file = open('champs.txt', 'w')
+    for key in static_champ_list['data']:
+        champ_ids[int(static_champ_list['data'][key]['key'])] = {'index': n, 'name': key}
+        # write to text file for debugging purposes
+        file.write('{0}: [{1}, {2}]\n'.format(int(static_champ_list['data'][key]['key']), n, key))
+        n += 1
 
 
 # Game object is the form our data needs to be in so our network is able to process the data
@@ -85,16 +104,13 @@ class Game:
 
 
 # Returns all ranked players in platinum and diamond elo
+# TODO: Make this function safe.
 def find_all_ranked_players():
     players = []
     for tier in ['DIAMOND', 'PLATINUM']:
         for division in ['I', 'II', 'III', 'IV']:
             players += watcher.league.entries(my_region, "RANKED_SOLO_5x5", tier, division)
     return players
-
-
-games_to_process = queue.Queue()
-matches = []
 
 
 # Attempts to insert a match_id into the list
@@ -115,49 +131,61 @@ def find_and_insert_match(match_id):
     return False
 
 
-# return the current time in milliseconds
-def current_time_milli():
-    return round(time.time() * 1000)
+def handle_api_err(err, callback, data):
+    global begin_time
+    code = int(str(err)[0:3])
+    if code == 429:
+        time_to_sleep = 24 - (current_time_milli() - begin_time) * 1000
+        print("429 Error. Exceeded Rate Limit. Sleeping for {0} seconds.".format(time_to_sleep))
+        time.sleep(time_to_sleep)
+        begin_time = current_time_milli()
+        return callback(data)
+    elif code == 400:
+        print("400 Error. Bad request.")
+    elif code == 403:
+        print("403 Error. Renew API.")
+    else:
+        print("{0} Error. Look it up.".format(code))
+    return None
+
+
+# Obtains a players ID. Returns None if HTTP error.
+def get_player_ID(player):
+    try:
+        return watcher.summoner.by_name(my_region, player['summonerName'])['accountId']
+    except ApiError as err:
+        return handle_api_err(err, get_player_ID, player)
+
+
+# Obtains a players match history for ranked solo/duo and flex. Returns None if HTTP error.
+def get_player_match_list(accountID):
+    try:
+        return watcher.match.matchlist_by_account(region=my_region, encrypted_account_id=accountID, queue=[420, 440])
+    except ApiError as err:
+        return handle_api_err(err, get_player_match_list, accountID)
+
+
+# Obtain the match data from the API. Returns None if HTTP error or match was already processed.
+def get_match(match):
+    if not find_and_insert_match(int(match['gameId'])):
+        try:
+            return watcher.match.by_id(my_region, match['gameId'])
+        except ApiError as err:
+            return handle_api_err(err, get_match, match)
+    return None
 
 
 # function for mining Riot's data
 def game_miner():
-    begin_time = current_time_milli()
     for player in all_players:
-        try:
-            # Iterate through all players and push all their matches onto the queue if the match was not present in
-            # the cache
-            accountID = watcher.summoner.by_name(my_region, player['summonerName'])['accountId']
-            match_list = watcher.match.matchlist_by_account(region=my_region, encrypted_account_id=accountID,
-                                                            queue=[420, 440])
-            for match in match_list['matches']:
-                if not find_and_insert_match(int(match['gameId'])):
-                    try:
-                        match_data = watcher.match.by_id(my_region, match['gameId'])
-                        games_to_process.put(match_data)
-                    except ApiError as err:
-                        code = int(str(err)[0:3])
-                        if code == 429:
-                            logging.info("429 Error. Exceeded Rate Limit. Sleeping.")
-                            time.sleep(24 - (current_time_milli() - begin_time) * 1000)
-                            begin_time = current_time_milli()
-        except ApiError as err:
-            # Handle HTTP error codes
-            code = int(str(err)[0:3])
-            if code == 400:
-                logging.info("400 Error. Bad Request.")
-            elif code == 429:
-                # sleep for 1 minute since we reached max # of requests
-                # (we hit 20/s once, then 100/ 2 min, so we wait 24 seconds for average)
-                logging.info("429 Error. Exceeded Rate Limit. Sleeping.")
-                time.sleep(24 - (current_time_milli() - begin_time) * 1000)
-                begin_time = current_time_milli()
-            elif code == 403:
-                logging.info("403 Error. Renew API Key")
-            else:
-                logging.info(code)
-
-        exit()
+        player_id = get_player_ID(player)
+        if player_id is None:
+            print("ERROR???")
+        match_list = get_player_match_list(player_id)
+        for match in match_list:
+            match_data = get_match(match)
+            if match_data is not None:
+                games_to_process.put(match_data)
 
 
 # start thread
@@ -186,12 +214,14 @@ def player_to_role(player):
         return "NULL"
 
 
-# main
-if __name__ == "__main__":
+# process
+def process():
+    global all_players
+    init()
     all_players = find_all_ranked_players()
     logging.info("Interface    : players recieved.")
     start()
-    network = network.Network()
+    network = ne.Network()
     while True:
         if games_to_process.qsize() == 0:
             logging.info("Cannot parse none. Sleeping for 10s.")
@@ -210,3 +240,8 @@ if __name__ == "__main__":
             else:
                 game.add_red(player['championId'], player_to_role(player))
         game.push_to_network(network)
+
+
+# main
+if __name__ == "__main__":
+    process()
