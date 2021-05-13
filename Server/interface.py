@@ -72,9 +72,9 @@ def file_init():
     game_data_file = open("game_data.txt", "r")
 
     for match in match_id_file:
-        find_and_insert_match(int(match))
+        find_and_insert_match(int(match[:-1]))
     for player in players_file:
-        find_and_insert_player(player)
+        find_and_insert_player(player[:-1])
     for game in game_data_file:
         g = Game()
         g.from_file_str(game)
@@ -89,7 +89,8 @@ def file_init():
 class Game:
 
     # champs represented as indices of which they would occur on the network
-    def __init__(self, match_data=None):
+    def __init__(self, match_data=None, game_id=-1):
+        self.game_id = game_id
         self.blue_team = []
         self.red_team = []
         self.blue_winner = 0
@@ -143,6 +144,10 @@ class Game:
         network.solve()
         network.backpropagate(int(self.blue_winner))
 
+    # sets the game ID to a specific value
+    def set_game_id(self, id):
+        self.game_id = id
+
     def __str__(self):
         return 'BLUE: {0} , RED: {1}, winner: {2}'.format(self.blue_team, self.red_team, self.blue_winner)
 
@@ -158,6 +163,7 @@ class Game:
             if self.lanes[lane] != 2:
                 return "ERROR"
         str = ""
+        str += "{0}\t".format(self.game_id)
         if self.blue_winner:
             str += "1\t"
         else:
@@ -168,19 +174,34 @@ class Game:
             str += "{0}\t{1}\t".format(red['champ'], red['lane'])
         return str
 
+    # Return true if the game data is the exact same. False otherwise.
+    def equals(self, game):
+        if game.game_id != self.game_id:
+            return False
+        if game.blue_team != self.blue_winner:
+            return False
+        for a in range(0, 5):
+            if self.red_team[a]['champ'] != game.red_team[a]['champ'] or self.red_team[a]['lane'] != game.red_team[a]['lane']:
+                return False
+            if self.blue_team[a]['champ'] != game.blue_team[a]['champ'] or self.blue_team[a]['lane'] != game.blue_team[a]['lane']:
+                return False
+        return True
+
     # generates a Game object from str. It's assumed that any game object written to the file is valid
     def from_file_str(self, str):
         split = str.split("\t")
-        if split[0] == "0":
+        self.game_id = split[0]
+        if split[1] == "0":
             self.blue_winner = True
         else:
             self.blue_winner = False
-        for a in range(1, 11, 2):
+        for a in range(2, 12, 2):
             self.blue_team.append({'champ': split[a], 'lane': split[a + 1]})
             self.lanes[split[a + 1]] += 1
-        for a in range(11, 21, 2):
+        for a in range(12, 22, 2):
             self.red_team.append({'champ': split[a], 'lane': split[a + 1]})
             self.lanes[split[a + 1]] += 1
+        return self
 
 
 # Returns all ranked players in platinum and diamond elo
@@ -199,7 +220,6 @@ def find_and_insert_match(match_id):
     start, end = 0, len(matches)
     midpoint = int(len(matches) / 2)
     while start != end and start != end-1:
-        print("START: {0}\tMIDPOINT: {1}\tEND: {2}\t".format(start, midpoint, end))
         if matches[midpoint] < match_id:
             start = midpoint
             midpoint = math.floor((start + end) / 2)
@@ -265,6 +285,7 @@ def get_match(match):
 
 
 # function for parsing Riot's data and processing it
+# TODO: Do something with this
 def mine_and_process():
     for player in all_players:
         player_id = get_player_ID(player)
@@ -281,24 +302,29 @@ def mine_and_process():
 # function for mining Riot's game data
 def mine():
     for player in all_players:
-        print("PROCESSING PLAYER: {0}".format(player['summonerName']))
-        if not find_and_insert_player(player):
+        if not find_and_insert_player(player['summonerId']):
+            print("PROCESSING PLAYER: {0}".format(player['summonerId']))
             player_id = get_player_ID(player)
             if player_id is None:
                 continue
             match_list = get_player_match_list(player_id)['matches']
+            if len(match_list) == 0:
+                players_file.write(player['summonerId'] + '\n')
+                continue
             for match in match_list:
                 match_data = get_match(match)
                 if match_data is not None:
-                    print("PROCESSING MATCH: {0}".format(match['gameId']))
                     match_id_file.write(str(match['gameId']) + '\n')
-                    game = Game(match_data)
+                    game = Game(match_data, int(match['gameId']))
                     write_me = game.to_file_str() + '\n'
                     if write_me == "ERROR\n":
                         continue
                     else:
                         game_data_file.write(write_me)
-        players_file.write(player['summonerName'] + '\n')
+                else:
+                    print('skipping')
+            players_file.write(player['summonerId'] + '\n')
+
 
 
 # start thread
@@ -351,8 +377,29 @@ def passive_mine_init():
     mine()
 
 
+# test function to test the integrity of the game data
+def game_integrity():
+    global game_data_file
+    print("Checking game data integrity.")
+    game_data_file = open("game_data.txt", "r")
+    games = []
+    for game_str in game_data_file:
+        g = Game()
+        games.append(g.from_file_str(game_str))
+    dupes = 0
+    for a in range(0, len(games)):
+        for b in range(a+1, len(games)):
+            if games[a].equals(games[b]):
+                dupes += 1
+                print("GAMES {0} AND {1} ARE EQUAL.".format(a, b))
+    print("FOUND {0} DUPLICATES.".format(dupes))
+
+
+
+
 # main
 if __name__ == "__main__":
     init()
+    #game_integrity()
     passive_mine_init()
     # process()
